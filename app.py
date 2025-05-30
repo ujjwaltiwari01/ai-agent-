@@ -4,34 +4,34 @@
 import streamlit as st
 import pandas as pd
 import time
-from openai import OpenAI
+import openai
 import sib_api_v3_sdk
 from sib_api_v3_sdk.rest import ApiException
 import email_validator
-from dotenv import load_dotenv
 import os
 
 # ----------------------------
 # 🔑 YOUR API KEYS
 # ----------------------------
-load_dotenv()
+# For local development, load .env (optional, not needed on Streamlit Cloud)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-BREVO_API_KEY = os.getenv("BREVO_API_KEY")
-SENDER_NAME = os.getenv("SENDER_NAME")
-SENDER_EMAIL = os.getenv("SENDER_EMAIL")
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY"))
+BREVO_API_KEY = st.secrets.get("BREVO_API_KEY", os.getenv("BREVO_API_KEY"))
+SENDER_NAME = st.secrets.get("SENDER_NAME", os.getenv("SENDER_NAME"))
+SENDER_EMAIL = st.secrets.get("SENDER_EMAIL", os.getenv("SENDER_EMAIL"))
 
-# ----------------------------
-# 🔌 Initialize Clients
-# ----------------------------
-client = OpenAI(
-    api_key=OPENROUTER_API_KEY,
-    base_url="https://openrouter.ai/api/v1"
-)
+openai.api_key = OPENAI_API_KEY
 
 config = sib_api_v3_sdk.Configuration()
 config.api_key['api-key'] = BREVO_API_KEY
 email_api = sib_api_v3_sdk.TransactionalEmailsApi(sib_api_v3_sdk.ApiClient(config))
+
+
 
 # ----------------------------
 # 📬 Email Validation
@@ -151,12 +151,13 @@ Body:
 - 6th: Sign-off ("Looking forward,\nBhaskar")
 """
 
+    client = openai.OpenAI(api_key=OPENAI_API_KEY)
     response = client.chat.completions.create(
-        model="meta-llama/llama-3.3-8b-instruct:free",
+        model="gpt-3.5-turbo",
         messages=[{"role": "user", "content": prompt}],
-        timeout=60  # Increase timeout to 60 seconds
+        temperature=0.7,
+        max_tokens=700,
     )
-
     result = response.choices[0].message.content.strip()
 
     # Extract subject and body, ensuring subject is not duplicated in the body
