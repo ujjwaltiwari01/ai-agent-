@@ -1,0 +1,6 @@
+streamlit
+pandas
+openai
+sib-api-v3-sdk
+python-dotenv
+email-validator
