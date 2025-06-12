@@ -9,6 +9,8 @@ import sib_api_v3_sdk
 from sib_api_v3_sdk.rest import ApiException
 import email_validator
 import os
+import requests
+from bs4 import BeautifulSoup
 
 # ----------------------------
 # 🔑 YOUR API KEYS
@@ -20,10 +22,19 @@ try:
 except ImportError:
     pass
 
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY"))
-BREVO_API_KEY = st.secrets.get("BREVO_API_KEY", os.getenv("BREVO_API_KEY"))
-SENDER_NAME = st.secrets.get("SENDER_NAME", os.getenv("SENDER_NAME"))
-SENDER_EMAIL = st.secrets.get("SENDER_EMAIL", os.getenv("SENDER_EMAIL"))
+import streamlit as st
+import os
+
+def get_secret(key):
+    try:
+        return st.secrets[key]
+    except Exception:
+        return os.getenv(key)
+
+OPENAI_API_KEY = get_secret("OPENAI_API_KEY")
+BREVO_API_KEY = get_secret("BREVO_API_KEY")
+SENDER_NAME = get_secret("SENDER_NAME")
+SENDER_EMAIL = get_secret("SENDER_EMAIL")
 
 openai.api_key = OPENAI_API_KEY
 
@@ -51,9 +62,30 @@ def is_role_based_email(email):
     return any(local_part.startswith(role) for role in role_keywords)
 
 # ----------------------------
+# 🌐 Website Scraping for Personalization
+# ----------------------------
+def scrape_website_info(website_url):
+    """Scrape website title and meta description for personalization."""
+    try:
+        resp = requests.get(website_url, timeout=8)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        title = soup.title.string.strip() if soup.title else ""
+        meta_desc = ""
+        desc_tag = soup.find("meta", attrs={"name": "description"})
+        if desc_tag and desc_tag.get("content"):
+            meta_desc = desc_tag["content"].strip()
+        return title, meta_desc
+    except Exception as e:
+        return "", ""
+
+# ----------------------------
 # ✍️ Email Generation
 # ----------------------------
 def generate_email(company, website, keywords):
+    # Now this works!
+    title, meta_desc = scrape_website_info(website)
+    website_info = f"Website Title: {title}\nMeta Description: {meta_desc}" if (title or meta_desc) else "No website info found."
+
     prompt = f"""
 - Subject: Write a short, highly personalized, persuasive cold email for potential clients of Radian Marketing. The email should feel handcrafted, warm, and results-focused while subtly selling the expertise and unique benefits of working with Radian.
 
@@ -139,6 +171,7 @@ def generate_email(company, website, keywords):
 Company: {company}
 Website: {website}
 Keywords: {keywords}
+Website Info (scraped): {website_info}
 
 Email Format:
 Subject: <short subject>
@@ -195,6 +228,75 @@ Body:
         body += "\n\nIf this isn't for you, just reply STOP."
 
     return subject, body
+
+    if "stop" not in body.lower():
+        body += "\n\nIf this isn't for you, just reply STOP."
+
+    return subject, body
+
+def generate_followup_email(company, website, keywords, prev_subject, prev_body):
+    # Scrape website info for personalization
+    title, meta_desc = scrape_website_info(website)
+    website_info = f"Website Title: {title}\nMeta Description: {meta_desc}" if (title or meta_desc) else "No website info found."
+
+    prompt = f"""
+- Subject: Write a short, warm, and highly personalized follow-up cold email for a potential client of Radian Marketing. 
+- The recipient received a previous email with the subject: "{prev_subject}".
+- The follow-up should reference the previous outreach, show genuine interest, and offer new value or insight based on their website or business.
+- Avoid sounding pushy or desperate. Keep it friendly, helpful, and results-focused.
+- Use any relevant info from their website for personalization.
+
+Company: {company}
+Website: {website}
+Keywords: {keywords}
+Website Info (scraped): {website_info}
+Previous Email Body: {prev_body}
+
+Email Format:
+Subject: <short subject>
+Body:
+- 1st: Reference previous email and express continued interest
+- 2nd: Add a new insight, value, or question based on their business/website
+- 3rd: Soft CTA (invite to connect, offer value, etc.)
+- 4th: Sign-off ("Looking forward,\nBhaskar")
+"""
+
+    client = openai.OpenAI(api_key=OPENAI_API_KEY)
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7,
+        max_tokens=700,
+    )
+    result = response.choices[0].message.content.strip()
+
+    # Extract subject and body
+    subject = ""
+    body = ""
+    lines = result.splitlines()
+    found_subject = False
+    found_body = False
+    body_lines = []
+
+    for line in lines:
+        if not found_subject and line.lower().startswith("subject:"):
+            subject = line.split(":", 1)[1].strip()
+            found_subject = True
+        elif line.lower().startswith("body:"):
+            found_body = True
+            continue
+        elif found_body:
+            body_lines.append(line)
+
+    if not subject:
+        subject = "Quick Follow-up: Radian Marketing"
+    if not body_lines:
+        body_lines = [l for l in lines if not l.lower().startswith("subject:") and not l.lower().startswith("body:")]
+
+    body = "\n".join(body_lines).strip()
+
+    if body.lower().startswith(subject.lower()):
+        body = body[len(subject):].lstrip(" :\n")
 
     if "stop" not in body.lower():
         body += "\n\nIf this isn't for you, just reply STOP."
@@ -264,6 +366,46 @@ if file:
 
         st.balloons()
         st.success("✅ All emails processed!")
+
+        if skipped:
+            st.warning(f"⚠️ Skipped {len(skipped)} emails.")
+            st.dataframe(pd.DataFrame(skipped, columns=["Row", "Email", "Reason"]))
+    if st.button("🔁 Send Follow-up Emails"):
+        skipped = []
+        for i in range(start, end):
+            row = df.iloc[i]
+            company = str(row.get("co_name", "")).strip()
+            website = str(row.get("website", "")).strip()
+            email = str(row.get("email", "")).strip()
+            keywords = str(row.get("keywords", "")).strip()
+            name = str(row.get("Name", company)).strip()
+
+            if not email or not is_valid_email_address(email):
+                skipped.append((i, email, "Invalid email"))
+                continue
+
+            st.markdown(f"#### 🔁 Sending follow-up to {name} ({email})")
+
+            try:
+                # Generate the original email to use as context for the follow-up
+                prev_subject, prev_body = generate_email(company, website, keywords)
+                subject, body = generate_followup_email(company, website, keywords, prev_subject, prev_body)
+                st.code(f"Subject: {subject}", language="text")
+                st.code(body, language="markdown")
+
+                send_email(email, name, subject, body)
+                st.success(f"✅ Follow-up sent to {email}")
+            except ApiException as e:
+                st.error(f"❌ Brevo API Error: {e}")
+                skipped.append((i, email, "Brevo error"))
+            except Exception as e:
+                st.error(f"❌ AI/General Error: {e}")
+                skipped.append((i, email, "General error"))
+
+            time.sleep(1.5)  # avoid rate limits
+
+        st.balloons()
+        st.success("✅ All follow-up emails processed!")
 
         if skipped:
             st.warning(f"⚠️ Skipped {len(skipped)} emails.")
